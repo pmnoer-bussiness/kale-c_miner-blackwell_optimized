@@ -3,9 +3,9 @@
  * Author: Fred Kyung-jin Rezeau <fred@litemint.com>
  */
 
-const { SorobanRpc, Horizon, xdr, Address, Operation, Asset, Contract, Networks, TransactionBuilder, StrKey, Memo, Keypair, nativeToScVal, scValToNative } = require('@stellar/stellar-sdk');
+const { rpc, Horizon, xdr, Address, Operation, Asset, Contract, Networks, TransactionBuilder, StrKey, Memo, Keypair, nativeToScVal, scValToNative } = require('@stellar/stellar-sdk');
 const config = require(process.env.CONFIG || './config.json');
-const rpc = new SorobanRpc.Server(process.env.RPC_URL || config.stellar?.rpc, { allowHttp: true });
+const server = new rpc.Server(process.env.RPC_URL || config.stellar?.rpc, { allowHttp: true });
 const horizon = new Horizon.Server(config.stellar?.horizon || 'https://horizon.stellar.org', { allowHttp: true });
 const contractId = config.stellar?.contract;
 const fees = config.stellar?.fees || 10000000;
@@ -63,13 +63,13 @@ const getReturnValue = (resultMetaXdr) => {
     const txMeta = LaunchTube.isValid()
         ? xdr.TransactionMeta.fromXDR(resultMetaXdr, "base64")
         : xdr.TransactionMeta.fromXDR(resultMetaXdr.toXDR().toString("base64"), "base64");
-    return txMeta.v3().sorobanMeta().returnValue();
+    return txMeta.v4().sorobanMeta().returnValue();
 };
 
 async function getInstanceData() {
     const result = {};
     try {
-        const { val } = await rpc.getContractData(
+        const { val } = await server.getContractData(
             contractId,
             xdr.ScVal.scvLedgerKeyContractInstance()
         );
@@ -102,7 +102,7 @@ async function getTemporaryData(key) {
                 durability: xdr.ContractDataDurability.temporary(),
             })
         );
-        const blockData = await rpc.getLedgerEntries(data);
+        const blockData = await server.getLedgerEntries(data);
         const entry = blockData.entries?.[0];
         if (entry) {
             return scValToNative(entry.val?._value.val());
@@ -134,7 +134,7 @@ async function setupAsset(farmer) {
                 .setTimeout(300)
                 .build();
             transaction.sign(Keypair.fromSecret(signers[farmer].secret));
-            const response = await getResponse(await rpc.sendTransaction(transaction));
+            const response = await getResponse(await server.sendTransaction(transaction));
             if (response.status !== 'SUCCESS') {
                 throw new Error(`tx Failed: ${response.hash}`);
             }
@@ -152,7 +152,7 @@ async function getResponse(response, launchTube) {
     if (!launchTube) {
         while (response.status === "PENDING" || response.status === "NOT_FOUND") {
             await new Promise(resolve => setTimeout(resolve, 2000));
-            response = await rpc.getTransaction(txId);
+            response = await server.getTransaction(txId);
         }
     }
     if (config.stellar?.debug) {
@@ -186,7 +186,7 @@ async function hoard() {
         const transaction = builder.setTimeout(300).build();
         Object.values(signers).forEach(s => transaction.sign(Keypair.fromSecret(s.secret)));
 
-        const response = await getResponse(await rpc.sendTransaction(transaction));
+        const response = await getResponse(await server.sendTransaction(transaction));
         const hash = transaction.hash().toString('hex');
         if (debug) console.log(response);
         if (response.status !== 'SUCCESS') {
@@ -233,16 +233,16 @@ async function invoke(method, data) {
     }
 
     const isLaunchTube = LaunchTube.isValid();
-    let transaction = new TransactionBuilder(await rpc.getAccount(source?.publicKey() || data.farmer), { 
+    let transaction = new TransactionBuilder(await server.getAccount(source?.publicKey() || data.farmer), { 
         fee: isLaunchTube ? '0' : fees.toString(),
         networkPassphrase: config.stellar?.networkPassphrase || Networks.PUBLIC
     }).addOperation(args).setTimeout(isLaunchTube ? 30 : 300).build();
 
-    const sim = await rpc.simulateTransaction(transaction);
+    const sim = await server.simulateTransaction(transaction);
     if (config.stellar?.debug && sim.error) {
         console.error(JSON.stringify(sim.error));
     }
-    transaction = SorobanRpc.assembleTransaction(transaction, sim).build();
+    transaction = rpc.assembleTransaction(transaction, sim).build();
     transaction.sign(Keypair.fromSecret(source?.secret() || farmer.secret));
 
     if (config.stellar?.debug) {
@@ -256,7 +256,7 @@ async function invoke(method, data) {
         return await getResponse(await LaunchTube.send(transaction.toEnvelope().toXDR('base64'),
             config.stellar?.launchtube?.fees || transaction.fee, method), true);
     } else {
-        return await getResponse(await rpc.sendTransaction(transaction));
+        return await getResponse(await server.sendTransaction(transaction));
     }
 }
 
@@ -313,4 +313,4 @@ class LaunchTube {
     }
 }
 
-module.exports = { getInstanceData, getTemporaryData, getPail, getError, getReturnValue, invoke, hoard, LaunchTube, rpc, horizon, contractId, contractErrors, signers, blockData, balances, session };
+module.exports = { getInstanceData, getTemporaryData, getPail, getError, getReturnValue, invoke, hoard, LaunchTube, server, horizon, contractId, contractErrors, signers, blockData, balances, session };
