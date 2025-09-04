@@ -3,7 +3,7 @@
  * Author: Fred Kyung-jin Rezeau <fred@litemint.com>
  */
 
-const { rpc, Horizon, xdr, Address, Operation, Asset, Contract, Networks, TransactionBuilder, StrKey, Memo, Keypair, nativeToScVal, scValToNative } = require('@stellar/stellar-sdk');
+const { rpc, Horizon, xdr, Address, Operation, Asset, Contract, Networks, TransactionBuilder, StrKey, Memo, Keypair, Account, nativeToScVal, scValToNative, authorizeEntry } = require('@stellar/stellar-sdk');
 const config = require(process.env.CONFIG || './config.json');
 const server = new rpc.Server(process.env.RPC_URL || config.stellar?.rpc, { allowHttp: true });
 const horizon = new Horizon.Server(config.stellar?.horizon || 'https://horizon.stellar.org', { allowHttp: true });
@@ -233,7 +233,7 @@ async function invoke(method, data) {
     }
 
     const isLaunchTube = LaunchTube.isValid();
-    let transaction = new TransactionBuilder(await server.getAccount(source?.publicKey() || data.farmer), { 
+    let transaction = new TransactionBuilder(isLaunchTube ? new Account(config.stellar.assetIssuer, '0') : await server.getAccount(source?.publicKey() || data.farmer), { 
         fee: isLaunchTube ? '0' : fees.toString(),
         networkPassphrase: config.stellar?.networkPassphrase || Networks.PUBLIC
     }).addOperation(args).setTimeout(isLaunchTube ? 30 : 300).build();
@@ -243,7 +243,11 @@ async function invoke(method, data) {
         console.error(JSON.stringify(sim.error));
     }
     transaction = rpc.assembleTransaction(transaction, sim).build();
-    transaction.sign(Keypair.fromSecret(source?.secret() || farmer.secret));
+
+    const signer = Keypair.fromSecret(source?.secret() || farmer.secret);
+    if (!isLaunchTube) {
+        transaction.sign(signer);
+    }
 
     if (config.stellar?.debug) {
         console.log(transaction.toEnvelope().toXDR('base64'));
@@ -253,7 +257,10 @@ async function invoke(method, data) {
     session.log = session.log.slice(-50);
 
     if (isLaunchTube) {
-        return await getResponse(await LaunchTube.send(transaction.toEnvelope().toXDR('base64'),
+        const auth = await Promise.all(sim.result.auth.map((entry) =>
+            authorizeEntry(entry, signer, (sim.latestLedger || 0) + 12, config.stellar?.networkPassphrase || Networks.PUBLIC))
+        );
+        return await getResponse(await LaunchTube.send(args.body().value().hostFunction(), auth,
             config.stellar?.launchtube?.fees || transaction.fee, method), true);
     } else {
         return await getResponse(await server.sendTransaction(transaction));
@@ -285,23 +292,29 @@ class LaunchTube {
         }
     }
 
-    static async send(xdr, fee, method) {
+    static async send(func, auth, fee, method) {
         const headers = {
             'Authorization': `Bearer ${config.stellar.launchtube.token}`,
             'X-Client-Name': 'cpp-kale-miner',
-            'X-Client-Version': '1.0.0'
+            'X-Client-Version': '1.0.1',
+            'Content-Type': 'application/x-www-form-urlencoded'
         };
 
         await this.checkCredits(fee, headers, method);
 
-        const data = new FormData();
-        data.append('xdr', xdr);
-        data.append('fee', fee.toString());
-        data.append('sim', false);
-        const res = await fetch(config.stellar.launchtube.url, {
+        const body = new URLSearchParams();
+        const v2 = config.stellar.launchtube.v2;
+        if (v2) {
+            body.set('op', xdr.Operation.toXDR(Operation.invokeHostFunction({ func, auth })).toString('base64'));
+        } else {
+            body.set('func', xdr.HostFunction.toXDR(func).toString('base64'));
+            body.set('auth', JSON.stringify(auth.map((entry) => xdr.SorobanAuthorizationEntry.toXDR(entry).toString('base64')) || []));
+        }
+
+        const res = await fetch(`${config.stellar.launchtube.url}${v2 ? '/v2' : ''}`, {
             method: 'POST',
             headers,
-            body: data
+            body: body.toString()
         });
         if (res.ok) {
             return await res.json();
