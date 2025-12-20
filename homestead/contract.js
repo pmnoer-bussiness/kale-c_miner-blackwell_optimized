@@ -4,6 +4,7 @@
  */
 
 const { rpc, Horizon, xdr, Address, Operation, Asset, Contract, Networks, TransactionBuilder, StrKey, Memo, Keypair, Account, nativeToScVal, scValToNative, authorizeEntry } = require('@stellar/stellar-sdk');
+const { ChannelsClient, PluginExecutionError } = require('@openzeppelin/relayer-plugin-channels');
 const config = require(process.env.CONFIG || './config.json');
 const server = new rpc.Server(process.env.RPC_URL || config.stellar?.rpc, { allowHttp: true });
 const horizon = new Horizon.Server(config.stellar?.horizon || 'https://horizon.stellar.org', { allowHttp: true });
@@ -23,6 +24,11 @@ const signers = config.farmers.reduce((acc, farmer) => {
     };
     return acc;
 }, {});
+
+const channelsClient = config.stellar?.channels ? new ChannelsClient({
+  baseUrl: config.stellar.channels.url,
+  apiKey: config.stellar.channels.key
+}) : null;
 
 const blockData = {
     hash: null,
@@ -60,7 +66,7 @@ const getError = (error) => {
 };
 
 const getReturnValue = (resultMetaXdr) => {
-    const txMeta = LaunchTube.isValid()
+    const txMeta = LaunchTube.isValid() && !Channels.isValid()
         ? xdr.TransactionMeta.fromXDR(resultMetaXdr, "base64")
         : xdr.TransactionMeta.fromXDR(resultMetaXdr.toXDR().toString("base64"), "base64");
     return txMeta.v4().sorobanMeta().returnValue();
@@ -232,11 +238,11 @@ async function invoke(method, data) {
             break;
     }
 
-    const isLaunchTube = LaunchTube.isValid();
-    let transaction = new TransactionBuilder(isLaunchTube ? new Account(config.stellar.assetIssuer, '0') : await server.getAccount(source?.publicKey() || data.farmer), { 
-        fee: isLaunchTube ? '0' : fees.toString(),
+    const relayer = Channels.isValid() || LaunchTube.isValid();
+    let transaction = new TransactionBuilder(relayer ? new Account(config.stellar.assetIssuer, '0') : await server.getAccount(source?.publicKey() || data.farmer), { 
+        fee: relayer ? '0' : fees.toString(),
         networkPassphrase: config.stellar?.networkPassphrase || Networks.PUBLIC
-    }).addOperation(args).setTimeout(isLaunchTube ? 30 : 300).build();
+    }).addOperation(args).setTimeout(relayer ? 30 : 300).build();
 
     const sim = await server.simulateTransaction(transaction);
     if (config.stellar?.debug && sim.error) {
@@ -245,7 +251,7 @@ async function invoke(method, data) {
     transaction = rpc.assembleTransaction(transaction, sim).build();
 
     const signer = Keypair.fromSecret(source?.secret() || farmer.secret);
-    if (!isLaunchTube) {
+    if (!relayer) {
         transaction.sign(signer);
     }
 
@@ -256,12 +262,16 @@ async function invoke(method, data) {
     session.log.push({ stamp: Date.now(), msg: `Farmer ${data.farmer.slice(0, 4)}..${data.farmer.slice(-6)} invoked '${method}' ${params}`});
     session.log = session.log.slice(-50);
 
-    if (isLaunchTube) {
+    if (relayer) {
         const auth = await Promise.all(sim.result.auth.map((entry) =>
             authorizeEntry(entry, signer, (sim.latestLedger || 0) + 12, config.stellar?.networkPassphrase || Networks.PUBLIC))
         );
-        return await getResponse(await LaunchTube.send(args.body().value().hostFunction(), auth,
-            config.stellar?.launchtube?.fees || transaction.fee, method), true);
+        if (Channels.isValid()) {
+            return await getResponse(await Channels.send(args.body().value().hostFunction(), auth));
+        } else {
+            return await getResponse(await LaunchTube.send(args.body().value().hostFunction(), auth,
+                config.stellar?.launchtube?.fees || transaction.fee, method), true);
+        }
     } else {
         return await getResponse(await server.sendTransaction(transaction));
     }
@@ -322,6 +332,28 @@ class LaunchTube {
             const errorText = await res.text();
             console.error(`Launchtube: Error ${res.status}:`, errorText);
             throw new Error(`Launchtube: ${errorText}`);
+        }
+    }
+}
+
+class Channels {
+    static isValid() {
+        return !!channelsClient;
+    }
+
+    static async send(func, auth) {
+        try {
+            const result = await channelsClient.submitSorobanTransaction({
+                func: xdr.HostFunction.toXDR(func).toString('base64'),
+                auth: auth.map((entry) => xdr.SorobanAuthorizationEntry.toXDR(entry).toString('base64')) || []
+            });
+            return { status: 'PENDING', hash: result.hash };
+        } catch (error) {
+            if (error instanceof PluginExecutionError) {
+                throw new Error(`Channels: ${error.message} details: ${error.errorDetails?.details}`);
+            } else {
+                console.error(`Channels: ${error}`);
+            }
         }
     }
 }

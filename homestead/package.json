@@ -2,6 +2,7 @@
   "name": "homestead",
   "version": "1.0.0",
   "dependencies": {
+    "@openzeppelin/relayer-plugin-channels": "^0.5.0",
     "@stellar/stellar-sdk": "^14.1.1",
     "cors": "^2.8.5",
     "express": "^4.21.1"
