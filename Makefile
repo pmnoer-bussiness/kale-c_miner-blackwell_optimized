@@ -13,9 +13,14 @@ ifneq ($(OS),Windows_NT)
     CXX ?= g++
     NVCC = nvcc -ccbin $(CXX)
 
-    COMMON_FLAGS = -O3 -DNDEBUG -ffast-math -funroll-loops -pthread -std=c++17 -Iutils
-    GXX_FLAGS = $(COMMON_FLAGS) -march=native -flto
-    NVCC_FLAGS = $(COMMON_FLAGS)
+    # --- OPTIMASI GEFORCE BLACKWELL (LINUX) ---
+    CUDA_ARCH = -gencode arch=compute_120,code=sm_120
+    
+    COMMON_FLAGS = -O3 -DNDEBUG -pthread -std=c++17 -Iutils
+    GXX_FLAGS = $(COMMON_FLAGS) -ffast-math -funroll-loops -march=native -flto
+    
+    # Menggabungkan optimasi compiler host dan device (PTXAS)
+    NVCCFLAGS = $(CUDA_ARCH) --use_fast_math -Xptxas -O3 -Xcompiler "$(COMMON_FLAGS)"
 
     ifeq ($(shell uname),Darwin)
         ifeq ($(shell uname -m),arm64)
@@ -29,7 +34,7 @@ ifneq ($(OS),Windows_NT)
         SRCS = miner.cpp kernel.cu
         OBJS = miner.o kernel.o
         LINKER = $(NVCC)
-        LDFLAGS =
+        LDFLAGS = -Xcompiler "-flto"
     else ifneq ($(filter 2 OPENCL,$(GPU)),)
         CXXFLAGS = $(GXX_FLAGS) -DGPU=2 -DCL_TARGET_OPENCL_VERSION=$(OPENCL_VERSION)
         SRCS = miner.cpp clprog.cpp
@@ -45,7 +50,7 @@ ifneq ($(OS),Windows_NT)
         SRCS = miner.cpp
         OBJS = miner.o
         LINKER = $(CXX)
-        LDFLAGS = -pthread
+        LDFLAGS = -pthread -flto
     endif
 
     .PHONY: all clean
@@ -72,15 +77,20 @@ else
     CXX = cl
     NVCC = nvcc
 
-    VS_PATH = C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.38.33130
+    VS_PATH = C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207
     WINSDK_INCLUDE = C:/Program Files (x86)/Windows Kits/10/Include/10.0.22621.0
     WINSDK_LIB = C:/Program Files (x86)/Windows Kits/10/Lib/10.0.22621.0
-    GPU_INCLUDE = C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include
-    GPU_LIB = C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/lib/x64
+    GPU_INCLUDE = C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0/include
+    GPU_LIB = C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0/lib/x64
+
+    # --- OPTIMASI GEFORCE BLACKWELL (WINDOWS) ---
+    CUDA_ARCH = -gencode arch=compute_120,code=sm_120
 
     COMMON_FLAGS = /O2 /DNDEBUG /EHsc /std:c++17 /I"utils" /I"$(VS_PATH)/include" /I"$(WINSDK_INCLUDE)/ucrt" /wd4819
     COMMON_LDFLAGS = /link /LIBPATH:"$(WINSDK_LIB)/um/x64" /LIBPATH:"$(WINSDK_LIB)/ucrt/x64" /LIBPATH:"$(VS_PATH)/lib/x64"
-    NVCCFLAGS = -ccbin "cl" -I"$(GPU_INCLUDE)" -Xcompiler /wd4819
+    
+    # Konfigurasi NVCC Windows yang dioptimasi penuh untuk RTX 50-Series
+    NVCCFLAGS = -ccbin "cl" $(CUDA_ARCH) --use_fast_math -Xptxas -O3 -I"$(GPU_INCLUDE)" -Xcompiler "/O2 /DNDEBUG /EHsc /std:c++17 /wd4819"
 
     ifeq ($(GPU),CUDA)
         CXXFLAGS = $(COMMON_FLAGS) /I"$(GPU_INCLUDE)" /DGPU=1
